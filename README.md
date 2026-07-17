@@ -2,9 +2,29 @@
 
 `oauthsonas` is a small, in-memory OpenID Connect provider for local development and integration tests. It implements a real browser Authorization Code flow with S256 PKCE, rotating refresh tokens, RS256 JWT access and ID tokens, discovery, JWKS, userinfo, logout, and configurable personas.
 
+## Objectives
+
+- Replace an external OIDC provider during local development and integration tests without bypassing the relying party's real browser flow.
+- Exercise discovery, Authorization Code + S256 PKCE, callback-state preservation, token exchange, JWKS validation, userinfo, logout, and refresh-token rotation.
+- Provide stable application claims compatible with the future Auth0 post-login contract: `https://myo.optimicdn.com/roles`, optional `org_id`, and optional memberships.
+- Keep identities reproducible in YAML while leaving application authorization and role-to-permission expansion to the relying application.
+- Remain intentionally minimal: no database, password authentication, user provisioning, Auth0 Management API, or production deployment support.
+
 ## Security warning
 
 **Development and test use only. Never expose this server to the internet or deploy it to production.** It has an in-memory persona picker instead of real authentication, generates a new signing key on every start, and has no persistent state. It binds to `127.0.0.1` by default and refuses non-loopback addresses unless `TESTOIDC_ALLOW_NON_LOOPBACK=true` is set deliberately.
+
+## Quick usage
+
+1. Start the provider with the example client and personas:
+
+   ```sh
+   go run ./cmd/oauthsonas --config config.example.yaml
+   ```
+
+2. Configure the dashboard with the values in [Dashboard example](#dashboard-example).
+3. Start the dashboard login flow and choose a persona in the local authorization page, such as **Acme Administrator**.
+4. The dashboard callback receives a normal authorization code; its OIDC library exchanges it and validates the RS256 tokens against the published JWKS.
 
 ## Run locally
 

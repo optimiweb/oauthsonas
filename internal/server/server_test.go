@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-jose/go-jose/v3"
 	"github.com/optimiweb/oauthsonas/internal/config"
+	"golang.org/x/oauth2"
 )
 
 const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcdef"
@@ -239,6 +241,62 @@ func TestStaffPersonaHasNoOrganization(t *testing.T) {
 	claims := jwtClaims(t, p, result["access_token"].(string))
 	if _, ok := claims["org_id"]; ok {
 		t.Fatalf("staff token includes org_id: %#v", claims)
+	}
+}
+
+func TestOAuth2ClientAuthorizationCodeFlow(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	browser := browserClient(t)
+	oauthClient := &oauth2.Config{
+		ClientID:    "dashboard",
+		RedirectURL: "http://127.0.0.1:5173/auth/callback",
+		Scopes:      []string{"openid", "profile", "email"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  p.baseURL + "/oauth2/auth",
+			TokenURL: p.baseURL + "/oauth2/token",
+		},
+	}
+
+	authorizeURL := oauthClient.AuthCodeURL(
+		"state-value-123",
+		oauth2.S256ChallengeOption(verifier),
+		oauth2.SetAuthURLParam("nonce", "nonce-value-123"),
+		oauth2.SetAuthURLParam("audience", "https://api.optimicdn.test"),
+	)
+	u, err := url.Parse(authorizeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrf := begin(t, p, browser, u.Query())
+	code := selectPersona(t, p, browser, csrf, "acme-admin")
+
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, browser)
+	token, err := oauthClient.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+	if err != nil {
+		t.Fatalf("oauth2 exchange: %v", err)
+	}
+	if token.AccessToken == "" || token.Extra("id_token") == nil {
+		t.Fatalf("oauth2 token is incomplete: %#v", token)
+	}
+	claims := jwtClaims(t, p, token.AccessToken)
+	if claims["sub"] != "testoidc|acme-admin" || claims["org_id"] != "org_acme" {
+		t.Fatalf("unexpected OAuth2 access token claims: %#v", claims)
+	}
+
+	response, err := oauthClient.Client(ctx, token).Get(p.baseURL + "/userinfo")
+	if err != nil {
+		t.Fatalf("oauth2 userinfo request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("userinfo status = %d", response.StatusCode)
+	}
+	var userinfo map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&userinfo); err != nil {
+		t.Fatal(err)
+	}
+	if userinfo["email"] != "admin@acme.dev.optimi.test" || userinfo[rolesClaim] == nil {
+		t.Fatalf("unexpected OAuth2 userinfo: %#v", userinfo)
 	}
 }
 
