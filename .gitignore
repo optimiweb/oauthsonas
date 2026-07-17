@@ -1,0 +1,6 @@
+# Go build outputs
+/oauthsonas
+/coverage.out
+
+# Local configuration
+/config.yaml

@@ -17,40 +17,40 @@ clients:
 
 personas:
   - id: platform-admin
-    subject: testoidc|platform-admin
+    subject: oauthsonas|platform-admin
     email: platform-admin@dev.optimi.test
     name: Platform Admin
     roles: [platform-admin]
 
   - id: operator
-    subject: testoidc|operator
+    subject: oauthsonas|operator
     email: operator@dev.optimi.test
     name: Operations User
     roles: [operator]
 
   - id: account-manager-acme
-    subject: testoidc|account-manager-acme
+    subject: oauthsonas|account-manager-acme
     email: account-manager@dev.optimi.test
     name: Acme Account Manager
     roles: [account-manager]
     memberships: [org_acme]
 
   - id: acme-admin
-    subject: testoidc|acme-admin
+    subject: oauthsonas|acme-admin
     email: admin@acme.dev.optimi.test
     name: Acme Administrator
     organization_id: org_acme
     roles: [customer-admin]
 
   - id: acme-viewer
-    subject: testoidc|acme-viewer
+    subject: oauthsonas|acme-viewer
     email: viewer@acme.dev.optimi.test
     name: Acme Viewer
     organization_id: org_acme
     roles: [customer-viewer]
 
   - id: bravo-admin
-    subject: testoidc|bravo-admin
+    subject: oauthsonas|bravo-admin
     email: admin@bravo.dev.optimi.test
     name: Bravo Administrator
     organization_id: org_bravo

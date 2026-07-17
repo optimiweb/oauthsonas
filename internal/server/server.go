@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -132,7 +133,7 @@ func (s *interactionStore) take(id, csrf string) (fosite.AuthorizeRequester, boo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	value, ok := s.m[id]
-	if !ok || time.Now().After(value.expires) || value.csrf != csrf {
+	if !ok || time.Now().After(value.expires) || subtle.ConstantTimeCompare([]byte(value.csrf), []byte(csrf)) != 1 {
 		return nil, false
 	}
 	delete(s.m, id)
@@ -217,6 +218,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Vary", "Origin")
+	if r.Method == http.MethodOptions {
+		s.applyUnionCORS(w, r, []string{http.MethodGet})
+		return
+	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
 		return
@@ -224,6 +230,7 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 	if !s.applyUnionCORS(w, r, []string{"GET"}) {
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	endpoint := s.config.Issuer
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"issuer": endpoint, "authorization_endpoint": endpoint + "/oauth2/auth", "token_endpoint": endpoint + "/oauth2/token",
@@ -237,6 +244,11 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Vary", "Origin")
+	if r.Method == http.MethodOptions {
+		s.applyUnionCORS(w, r, []string{http.MethodGet})
+		return
+	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
 		return
@@ -244,6 +256,7 @@ func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
 	if !s.applyUnionCORS(w, r, []string{"GET"}) {
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	public := s.key.Public()
 	public.Algorithm, public.Use, public.KeyID = string(jose.RS256), "sig", s.key.KeyID
 	writeJSON(w, http.StatusOK, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{public}})
@@ -274,6 +287,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: interactionCookie + "_" + id, Value: id, Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300})
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.template.Execute(w, struct {
 		Personas      []config.Persona
@@ -555,8 +572,13 @@ func (s *Server) applyTokenCORS(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) applyUnionCORS(w http.ResponseWriter, r *http.Request, methods []string) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return r.Method != http.MethodOptions
+		if r.Method == http.MethodOptions {
+			methodNotAllowed(w, strings.Join(methods, ", "))
+			return false
+		}
+		return true
 	}
+	w.Header().Set("Vary", "Origin")
 	for _, client := range s.clients {
 		if contains(client.AllowedOrigins, origin) {
 			setCORS(w, origin, methods)
@@ -575,6 +597,7 @@ func (s *Server) applyClientCORS(w http.ResponseWriter, r *http.Request, client 
 	if origin == "" {
 		return true
 	}
+	w.Header().Set("Vary", "Origin")
 	if !contains(client.AllowedOrigins, origin) {
 		http.Error(w, "origin not allowed", http.StatusForbidden)
 		return false
@@ -590,7 +613,6 @@ func setCORS(w http.ResponseWriter, origin string, methods []string) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Methods", strings.Join(methods, ", "))
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-	w.Header().Set("Vary", "Origin")
 }
 
 func writeNoContent(w http.ResponseWriter) bool { w.WriteHeader(http.StatusNoContent); return false }

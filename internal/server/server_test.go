@@ -60,8 +60,8 @@ func testConfig(issuer string) *config.Config {
 		Issuer: issuer, APIAudience: "https://api.optimicdn.test", TokenTTL: "15m", AuthorizationCodeTTL: "5m", RefreshTokenTTL: "8h",
 		Clients: []config.Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/auth/callback"}, PostLogoutRedirectURIs: []string{"http://127.0.0.1:5173/"}, AllowedOrigins: []string{"http://127.0.0.1:5173"}}},
 		Personas: []config.Persona{
-			{ID: "acme-admin", Subject: "testoidc|acme-admin", Email: "admin@acme.dev.optimi.test", Name: "Acme Administrator", OrganizationID: "org_acme", Roles: []string{"customer-admin"}},
-			{ID: "operator", Subject: "testoidc|operator", Email: "operator@dev.optimi.test", Name: "Operations User", Roles: []string{"operator"}},
+			{ID: "acme-admin", Subject: "oauthsonas|acme-admin", Email: "admin@acme.dev.optimi.test", Name: "Acme Administrator", OrganizationID: "org_acme", Roles: []string{"customer-admin"}},
+			{ID: "operator", Subject: "oauthsonas|operator", Email: "operator@dev.optimi.test", Name: "Operations User", Roles: []string{"operator"}},
 		},
 	}
 }
@@ -209,11 +209,17 @@ func TestDiscoveryAndFullAuthorizationCodeFlow(t *testing.T) {
 	if !containsString(discovery["response_modes_supported"], "query") || discovery["request_uri_parameter_supported"] != false {
 		t.Fatalf("bad discovery capabilities: %#v", discovery)
 	}
+	if discoveryResponseCache := response.Header.Get("Cache-Control"); discoveryResponseCache != "public, max-age=60" {
+		t.Fatalf("discovery cache control = %q", discoveryResponseCache)
+	}
+	if discoveryResponseVary := response.Header.Get("Vary"); discoveryResponseVary != "Origin" {
+		t.Fatalf("discovery vary = %q", discoveryResponseVary)
+	}
 
 	client, result := fullFlow(t, p, "acme-admin")
 	accessToken, idToken := result["access_token"].(string), result["id_token"].(string)
 	access, id := jwtClaims(t, p, accessToken), jwtClaims(t, p, idToken)
-	if access["iss"] != p.baseURL || access["sub"] != "testoidc|acme-admin" || access["client_id"] != "dashboard" || access["scope"] != "openid profile email" {
+	if access["iss"] != p.baseURL || access["sub"] != "oauthsonas|acme-admin" || access["client_id"] != "dashboard" || access["scope"] != "openid profile email" {
 		t.Fatalf("bad access claims: %#v", access)
 	}
 	if _, ok := access["email"]; ok {
@@ -222,7 +228,7 @@ func TestDiscoveryAndFullAuthorizationCodeFlow(t *testing.T) {
 	if !containsString(access["aud"], "https://api.optimicdn.test") || !containsString(access[rolesClaim], "customer-admin") || access["org_id"] != "org_acme" {
 		t.Fatalf("bad access claims: %#v", access)
 	}
-	if id["iss"] != p.baseURL || id["sub"] != "testoidc|acme-admin" || id["nonce"] != "nonce-value-123" || !containsString(id["aud"], "dashboard") {
+	if id["iss"] != p.baseURL || id["sub"] != "oauthsonas|acme-admin" || id["nonce"] != "nonce-value-123" || !containsString(id["aud"], "dashboard") {
 		t.Fatalf("bad id claims: %#v", id)
 	}
 	if id["email"] != "admin@acme.dev.optimi.test" || id["name"] != "Acme Administrator" || !containsString(id[rolesClaim], "customer-admin") || id["org_id"] != "org_acme" {
@@ -301,7 +307,7 @@ func TestOAuth2ClientAuthorizationCodeFlow(t *testing.T) {
 		t.Fatalf("oauth2 token is incomplete: %#v", token)
 	}
 	claims := jwtClaims(t, p, token.AccessToken)
-	if claims["sub"] != "testoidc|acme-admin" || claims["org_id"] != "org_acme" {
+	if claims["sub"] != "oauthsonas|acme-admin" || claims["org_id"] != "org_acme" {
 		t.Fatalf("unexpected OAuth2 access token claims: %#v", claims)
 	}
 
@@ -445,9 +451,19 @@ func TestExpiredCodeAndInteractionTampering(t *testing.T) {
 
 func TestCORSAndLogoutValidation(t *testing.T) {
 	p := newTestProvider(t, 5*time.Minute)
-	request, _ := http.NewRequest(http.MethodOptions, p.baseURL+"/oauth2/token", nil)
-	request.Header.Set("Origin", "http://evil.example")
+	request, _ := http.NewRequest(http.MethodOptions, p.baseURL+"/.well-known/openid-configuration", nil)
+	request.Header.Set("Origin", "http://127.0.0.1:5173")
 	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent || response.Header.Get("Access-Control-Allow-Origin") != "http://127.0.0.1:5173" {
+		t.Fatalf("discovery preflight: status=%d origin=%q", response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"))
+	}
+	request, _ = http.NewRequest(http.MethodOptions, p.baseURL+"/oauth2/token", nil)
+	request.Header.Set("Origin", "http://evil.example")
+	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,6 +488,27 @@ func TestCORSAndLogoutValidation(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusFound || !strings.Contains(response.Header.Get("Location"), "state=logout-state") {
 		t.Fatalf("logout did not preserve state: status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
+func TestPersonaPickerSecurityHeaders(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	response, err := client.Get(authorizeURL(p.baseURL, validAuthorizeParams()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	for header, want := range map[string]string{
+		"Cache-Control":           "no-store",
+		"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+		"Referrer-Policy":         "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := response.Header.Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
 	}
 }
 

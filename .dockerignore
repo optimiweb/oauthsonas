@@ -1,0 +1,10 @@
+.git
+.github
+.gitignore
+.dockerignore
+CONTRIBUTING.md
+LICENSE
+README.md
+SECURITY.md
+coverage.out
+oauthsonas

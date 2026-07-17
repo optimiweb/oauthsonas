@@ -12,7 +12,7 @@
 
 ## Security warning
 
-**Development and test use only. Never expose this server to the internet or deploy it to production.** It has an in-memory persona picker instead of real authentication, generates a new signing key on every start, and has no persistent state. It binds to `127.0.0.1` by default and refuses non-loopback addresses unless `TESTOIDC_ALLOW_NON_LOOPBACK=true` is set deliberately.
+**Development and test use only. Never expose this server to the internet or deploy it to production.** It has an in-memory persona picker instead of real authentication, generates a new signing key on every start, and has no persistent state. It binds to `127.0.0.1` by default and refuses non-loopback addresses unless `OAUTHSONAS_ALLOW_NON_LOOPBACK=true` is set deliberately.
 
 ## Quick usage
 
@@ -28,6 +28,13 @@
 
 ## Run locally
 
+Install the Go version declared in `go.mod`, then either run from a checkout or
+install the command directly:
+
+```sh
+go install github.com/optimiweb/oauthsonas/cmd/oauthsonas@latest
+```
+
 ```sh
 go run ./cmd/oauthsonas --config config.example.yaml
 ```
@@ -36,6 +43,12 @@ Validate a configuration without starting the server:
 
 ```sh
 go run ./cmd/oauthsonas --config config.example.yaml --check-config
+```
+
+Print the build version:
+
+```sh
+oauthsonas --version
 ```
 
 Discovery is available at:
@@ -55,7 +68,7 @@ podman run --rm -p 127.0.0.1:8181:8181 oauthsonas
 
 Docker uses the same commands with `docker` in place of `podman`.
 
-The Containerfile intentionally sets `TESTOIDC_ALLOW_NON_LOOPBACK=true`, because a container must bind to `0.0.0.0` for its loopback-only published port to be reachable. Keep the published port loopback-bound as shown.
+The Containerfile intentionally sets `OAUTHSONAS_ALLOW_NON_LOOPBACK=true`, because a container must bind to `0.0.0.0` for its loopback-only published port to be reachable. Keep the published port loopback-bound as shown.
 
 Published releases are available from GitHub Container Registry after a SemVer Git tag is pushed:
 
@@ -89,7 +102,7 @@ To add a persona, append a unique entry under `personas`:
 
 ```yaml
   - id: delta-viewer
-    subject: testoidc|delta-viewer
+    subject: oauthsonas|delta-viewer
     email: viewer@delta.dev.optimi.test
     name: Delta Viewer
     organization_id: org_delta
@@ -123,6 +136,7 @@ JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OID
 - Standard scopes: `openid`, `profile`, `email`, and optional `offline_access`.
 - `audience` is optional, but if supplied it must exactly equal `api_audience`; access tokens always use that API audience.
 - `offline_access` issues a refresh token. Fosite rotates refresh tokens and detects/rejects reuse.
+- Supplying `scope` to a refresh request can only downscope. The narrower scope set becomes the grant for the rotated refresh token.
 - Authorization codes are short-lived and one-time. State is returned unchanged. Nonces are copied to ID tokens.
 - `GET` or `POST /userinfo` validates the bearer access token and returns the granted profile/custom claim subset.
 - `GET /logout` redirects only to a registered `post_logout_redirect_uri` and returns an optional `state` value. It does not represent a persistent authenticated browser session.
@@ -143,3 +157,21 @@ go test -race ./...
 ```
 
 There is intentionally no database, password flow, admin API, user-provisioning UI, Auth0 Organizations API, Management API, external identity provider, or production deployment manifest.
+
+All protocol state is in memory. Restart the process to clear issued codes and
+tokens; do not use a long-running shared instance as an authentication service.
+
+## Security
+
+Read [SECURITY.md](SECURITY.md) before reporting vulnerabilities. The project
+is deliberately unsafe for production use, even when the process is bound to a
+loopback address.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request
+guidelines.
+
+## License
+
+[MIT](LICENSE)

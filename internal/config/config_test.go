@@ -19,7 +19,7 @@ clients:
     typo_origin: http://127.0.0.1:5173
 personas:
   - id: user
-    subject: testoidc|user
+    subject: oauthsonas|user
     email: user@example.test
     name: User
     roles: [viewer]
@@ -59,7 +59,7 @@ clients:
     redirect_uris: [http://127.0.0.1:5173/callback]
 personas:
   - id: user
-    subject: testoidc|user
+    subject: oauthsonas|user
     email: user@example.test
     name: User
     roles: [viewer]
@@ -95,7 +95,7 @@ func TestValidateAllowsFixedRedirectQuery(t *testing.T) {
 		Issuer:      "http://127.0.0.1:8181",
 		APIAudience: "https://api.example.test",
 		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback?source=local"}}},
-		Personas:    []Persona{{ID: "user", Subject: "testoidc|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+		Personas:    []Persona{{ID: "user", Subject: "oauthsonas|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("fixed redirect query rejected: %v", err)

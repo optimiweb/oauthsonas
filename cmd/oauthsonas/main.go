@@ -1,26 +1,37 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/optimiweb/oauthsonas/internal/config"
 	"github.com/optimiweb/oauthsonas/internal/server"
 )
 
+var version = "devel"
+
 func main() {
 	configPath := flag.String("config", "config.example.yaml", "path to YAML configuration")
 	listen := flag.String("listen", "127.0.0.1:8181", "listen address")
 	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		log.Fatalf("unexpected positional arguments: %s", strings.Join(flag.Args(), " "))
+	}
+	if *showVersion {
+		fmt.Println(version)
+		return
 	}
 	c, err := config.Load(*configPath)
 	if err != nil {
@@ -46,8 +57,26 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	if err := httpServer.ListenAndServe(); err != nil {
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
 		log.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.Serve(listener) }()
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	case <-ctx.Done():
+		log.Printf("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("graceful shutdown failed: %v", err)
+		}
 	}
 }
 
@@ -56,7 +85,7 @@ func validateListenAddress(address string) error {
 	if err != nil {
 		return fmt.Errorf("invalid listen address %q: %w", address, err)
 	}
-	if os.Getenv("TESTOIDC_ALLOW_NON_LOOPBACK") == "true" {
+	if os.Getenv("OAUTHSONAS_ALLOW_NON_LOOPBACK") == "true" {
 		return nil
 	}
 	host = strings.Trim(host, "[]")
@@ -64,5 +93,5 @@ func validateListenAddress(address string) error {
 	if host == "localhost" || (ip != nil && ip.IsLoopback()) {
 		return nil
 	}
-	return fmt.Errorf("refusing non-loopback listen address %q; set TESTOIDC_ALLOW_NON_LOOPBACK=true to acknowledge development-only exposure", address)
+	return fmt.Errorf("refusing non-loopback listen address %q; set OAUTHSONAS_ALLOW_NON_LOOPBACK=true to acknowledge development-only exposure", address)
 }
