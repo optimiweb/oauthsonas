@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -55,6 +56,13 @@ func Load(path string) (*Config, error) {
 	if err := decoder.Decode(&c); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("config must contain exactly one YAML document")
+		}
+		return nil, fmt.Errorf("decode config: %w", err)
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -64,6 +72,10 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if err := validateAbsoluteURL(c.Issuer, "issuer"); err != nil {
 		return err
+	}
+	issuer, _ := url.Parse(c.Issuer)
+	if issuer.Path != "" {
+		return fmt.Errorf("issuer must not include a path")
 	}
 	if strings.HasSuffix(c.Issuer, "/") {
 		return fmt.Errorf("issuer must not end with '/'")
@@ -86,6 +98,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Clients) == 0 {
 		return fmt.Errorf("at least one client is required")
+	}
+	if len(c.Personas) == 0 {
+		return fmt.Errorf("at least one persona is required")
 	}
 	clientIDs := map[string]bool{}
 	for i := range c.Clients {
@@ -170,15 +185,16 @@ func parseDuration(raw, field string, fallback time.Duration) (time.Duration, er
 
 func validateAbsoluteURL(raw, field string) error {
 	u, err := url.Parse(raw)
-	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return fmt.Errorf("%s must be an absolute http(s) URL without query or fragment", field)
 	}
 	return nil
 }
 
 func validateRedirectURL(raw, field, client string) error {
-	if err := validateAbsoluteURL(raw, field); err != nil {
-		return fmt.Errorf("client %q: %w", client, err)
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Fragment != "" {
+		return fmt.Errorf("client %q: %s must be an absolute http(s) URL without fragment", client, field)
 	}
 	return nil
 }

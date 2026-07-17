@@ -47,3 +47,57 @@ func TestValidateRejectsDuplicateIDsAndInvalidIssuer(t *testing.T) {
 		t.Fatalf("duplicate persona accepted: %v", err)
 	}
 }
+
+func TestLoadRejectsAdditionalYAMLDocuments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `issuer: http://127.0.0.1:8181
+api_audience: https://api.example.test
+clients:
+  - id: dashboard
+    name: Dashboard
+    public: true
+    redirect_uris: [http://127.0.0.1:5173/callback]
+personas:
+  - id: user
+    subject: testoidc|user
+    email: user@example.test
+    name: User
+    roles: [viewer]
+---
+ignored: document
+`
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("additional YAML document accepted: %v", err)
+	}
+}
+
+func TestValidateRequiresPersonasAndRootIssuer(t *testing.T) {
+	c := &Config{
+		Issuer:      "http://127.0.0.1:8181/tenant",
+		APIAudience: "https://api.example.test",
+		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback"}}},
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "issuer must not include a path") {
+		t.Fatalf("issuer path accepted: %v", err)
+	}
+	c.Issuer = "http://127.0.0.1:8181"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "at least one persona") {
+		t.Fatalf("empty persona set accepted: %v", err)
+	}
+}
+
+func TestValidateAllowsFixedRedirectQuery(t *testing.T) {
+	c := &Config{
+		Issuer:      "http://127.0.0.1:8181",
+		APIAudience: "https://api.example.test",
+		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback?source=local"}}},
+		Personas:    []Persona{{ID: "user", Subject: "testoidc|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("fixed redirect query rejected: %v", err)
+	}
+}

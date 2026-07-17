@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/optimiweb/oauthsonas/internal/config"
 	"github.com/optimiweb/oauthsonas/internal/server"
@@ -16,12 +17,20 @@ import (
 func main() {
 	configPath := flag.String("config", "config.example.yaml", "path to YAML configuration")
 	listen := flag.String("listen", "127.0.0.1:8181", "listen address")
+	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
 	flag.Parse()
-	if err := validateListenAddress(*listen); err != nil {
-		log.Fatal(err)
+	if flag.NArg() != 0 {
+		log.Fatalf("unexpected positional arguments: %s", strings.Join(flag.Args(), " "))
 	}
 	c, err := config.Load(*configPath)
 	if err != nil {
+		log.Fatal(err)
+	}
+	if *checkConfig {
+		log.Printf("configuration %s is valid", *configPath)
+		return
+	}
+	if err := validateListenAddress(*listen); err != nil {
 		log.Fatal(err)
 	}
 	s, err := server.New(c)
@@ -29,7 +38,15 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("DEVELOPMENT ONLY: serving OIDC issuer %s on http://%s", c.Issuer, *listen)
-	if err := http.ListenAndServe(*listen, s.Handler()); err != nil {
+	httpServer := &http.Server{
+		Addr:              *listen,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

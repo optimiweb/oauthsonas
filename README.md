@@ -32,6 +32,12 @@
 go run ./cmd/oauthsonas --config config.example.yaml
 ```
 
+Validate a configuration without starting the server:
+
+```sh
+go run ./cmd/oauthsonas --config config.example.yaml --check-config
+```
+
 Discovery is available at:
 
 ```text
@@ -92,7 +98,7 @@ To add a persona, append a unique entry under `personas`:
 
 Roles are carried as names only. This server never expands roles into application permissions. Add an optional top-level `allowed_roles` list if a project wants configuration-time role vocabulary validation; otherwise any non-empty role name is valid.
 
-Client `redirect_uris` and `post_logout_redirect_uris` are exact-match registration values. `allowed_origins` permits browser CORS only for the listed origins. Token and userinfo responses apply client-specific CORS; discovery and JWKS apply CORS only to the union of registered origins, never `*`.
+Client `redirect_uris` and `post_logout_redirect_uris` are exact-match registration values; they may include fixed query parameters but never fragments. `allowed_origins` permits browser CORS only for the listed origins. Token and userinfo responses apply client-specific CORS; discovery and JWKS apply CORS only to the union of registered origins, never `*`.
 
 ## Claims and keys
 
@@ -119,7 +125,7 @@ JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OID
 - `offline_access` issues a refresh token. Fosite rotates refresh tokens and detects/rejects reuse.
 - Authorization codes are short-lived and one-time. State is returned unchanged. Nonces are copied to ID tokens.
 - `GET` or `POST /userinfo` validates the bearer access token and returns the granted profile/custom claim subset.
-- `GET /logout` clears the local interaction cookie and redirects only to a registered `post_logout_redirect_uri`.
+- `GET /logout` redirects only to a registered `post_logout_redirect_uri` and returns an optional `state` value. It does not represent a persistent authenticated browser session.
 
 ## Endpoints
 

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,11 @@ type testProvider struct {
 	baseURL  string
 	server   *http.Server
 	listener net.Listener
+}
+
+type testInteraction struct {
+	csrf string
+	id   string
 }
 
 func newTestProvider(t *testing.T, codeTTL time.Duration) *testProvider {
@@ -82,7 +88,7 @@ func validAuthorizeParams() url.Values {
 	return url.Values{"response_type": {"code"}, "client_id": {"dashboard"}, "redirect_uri": {"http://127.0.0.1:5173/auth/callback"}, "scope": {"openid profile email"}, "state": {"state-value-123"}, "nonce": {"nonce-value-123"}, "code_challenge": {challenge(verifier)}, "code_challenge_method": {"S256"}, "audience": {"https://api.optimicdn.test"}}
 }
 
-func begin(t *testing.T, p *testProvider, client *http.Client, params url.Values) string {
+func begin(t *testing.T, p *testProvider, client *http.Client, params url.Values) testInteraction {
 	t.Helper()
 	response, err := client.Get(authorizeURL(p.baseURL, params))
 	if err != nil {
@@ -100,12 +106,16 @@ func begin(t *testing.T, p *testProvider, client *http.Client, params url.Values
 	if len(match) != 2 {
 		t.Fatalf("csrf missing from chooser: %s", body)
 	}
-	return string(match[1])
+	id := regexp.MustCompile(`name="interaction_id" value="([^"]+)"`).FindSubmatch(body)
+	if len(id) != 2 {
+		t.Fatalf("interaction id missing from chooser: %s", body)
+	}
+	return testInteraction{csrf: string(match[1]), id: string(id[1])}
 }
 
-func selectPersona(t *testing.T, p *testProvider, client *http.Client, csrf, persona string) string {
+func selectPersona(t *testing.T, p *testProvider, client *http.Client, interaction testInteraction, persona string) string {
 	t.Helper()
-	response, err := client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {csrf}, "persona": {persona}})
+	response, err := client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {interaction.csrf}, "interaction_id": {interaction.id}, "persona": {persona}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +154,8 @@ func exchange(t *testing.T, p *testProvider, client *http.Client, code, supplied
 func fullFlow(t *testing.T, p *testProvider, persona string) (*http.Client, map[string]interface{}) {
 	t.Helper()
 	client := browserClient(t)
-	csrf := begin(t, p, client, validAuthorizeParams())
-	code := selectPersona(t, p, client, csrf, persona)
+	interaction := begin(t, p, client, validAuthorizeParams())
+	code := selectPersona(t, p, client, interaction, persona)
 	result := exchange(t, p, client, code, verifier)
 	if result["_status"] != float64(http.StatusOK) && result["_status"] != http.StatusOK {
 		t.Fatalf("token exchange: %#v", result)
@@ -196,6 +206,9 @@ func TestDiscoveryAndFullAuthorizationCodeFlow(t *testing.T) {
 	if !containsString(discovery["code_challenge_methods_supported"], "S256") {
 		t.Fatal("discovery does not advertise S256")
 	}
+	if !containsString(discovery["response_modes_supported"], "query") || discovery["request_uri_parameter_supported"] != false {
+		t.Fatalf("bad discovery capabilities: %#v", discovery)
+	}
 
 	client, result := fullFlow(t, p, "acme-admin")
 	accessToken, idToken := result["access_token"].(string), result["id_token"].(string)
@@ -233,6 +246,15 @@ func TestDiscoveryAndFullAuthorizationCodeFlow(t *testing.T) {
 	if userinfo["email"] != "admin@acme.dev.optimi.test" || userinfo["name"] != "Acme Administrator" || userinfo["org_id"] != "org_acme" {
 		t.Fatalf("bad userinfo claims: %#v", userinfo)
 	}
+
+	response, err = http.Get(p.baseURL + "/userinfo?access_token=" + url.QueryEscape(accessToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("query access token status = %d", response.StatusCode)
+	}
 }
 
 func TestStaffPersonaHasNoOrganization(t *testing.T) {
@@ -267,8 +289,8 @@ func TestOAuth2ClientAuthorizationCodeFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	csrf := begin(t, p, browser, u.Query())
-	code := selectPersona(t, p, browser, csrf, "acme-admin")
+	interaction := begin(t, p, browser, u.Query())
+	code := selectPersona(t, p, browser, interaction, "acme-admin")
 
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, browser)
 	token, err := oauthClient.Exchange(ctx, code, oauth2.VerifierOption(verifier))
@@ -300,6 +322,28 @@ func TestOAuth2ClientAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
+func TestPublicClientRejectsSecretAuthentication(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	interaction := begin(t, p, client, validAuthorizeParams())
+	code := selectPersona(t, p, client, interaction, "acme-admin")
+
+	request, err := http.NewRequest(http.MethodPost, p.baseURL+"/oauth2/token", strings.NewReader(url.Values{"grant_type": {"authorization_code"}, "client_id": {"dashboard"}, "code": {code}, "redirect_uri": {"http://127.0.0.1:5173/auth/callback"}, "code_verifier": {verifier}}.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.SetBasicAuth("dashboard", "not-a-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("public client accepted basic authentication: %d", response.StatusCode)
+	}
+}
+
 func TestAuthorizationFailuresAndCodeReuse(t *testing.T) {
 	p := newTestProvider(t, 5*time.Minute)
 	client := browserClient(t)
@@ -311,6 +355,7 @@ func TestAuthorizationFailuresAndCodeReuse(t *testing.T) {
 		{"plain PKCE", func(v url.Values) { v.Set("code_challenge_method", "plain") }},
 		{"unknown client", func(v url.Values) { v.Set("client_id", "unknown") }},
 		{"bad redirect", func(v url.Values) { v.Set("redirect_uri", "http://127.0.0.1:9999/callback") }},
+		{"different loopback port", func(v url.Values) { v.Set("redirect_uri", "http://127.0.0.1:9999/auth/callback") }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -326,15 +371,15 @@ func TestAuthorizationFailuresAndCodeReuse(t *testing.T) {
 			}
 		})
 	}
-	csrf := begin(t, p, client, validAuthorizeParams())
-	code := selectPersona(t, p, client, csrf, "acme-admin")
+	interaction := begin(t, p, client, validAuthorizeParams())
+	code := selectPersona(t, p, client, interaction, "acme-admin")
 	wrong := exchange(t, p, client, code, verifier+"x")
 	if wrong["_status"] != float64(http.StatusBadRequest) && wrong["_status"] != http.StatusBadRequest {
 		t.Fatalf("wrong verifier accepted: %#v", wrong)
 	}
 	// PKCE request sessions are one-time too; issue a fresh code for reuse validation.
-	csrf = begin(t, p, client, validAuthorizeParams())
-	code = selectPersona(t, p, client, csrf, "acme-admin")
+	interaction = begin(t, p, client, validAuthorizeParams())
+	code = selectPersona(t, p, client, interaction, "acme-admin")
 	first := exchange(t, p, client, code, verifier)
 	if first["_status"] != float64(http.StatusOK) && first["_status"] != http.StatusOK {
 		t.Fatalf("first exchange failed: %#v", first)
@@ -345,11 +390,35 @@ func TestAuthorizationFailuresAndCodeReuse(t *testing.T) {
 	}
 }
 
+func TestExplicitQueryResponseMode(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	params := validAuthorizeParams()
+	params.Set("response_mode", "query")
+	interaction := begin(t, p, client, params)
+	if code := selectPersona(t, p, client, interaction, "acme-admin"); code == "" {
+		t.Fatal("query response mode did not produce a code")
+	}
+}
+
+func TestParallelBrowserInteractions(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	first := begin(t, p, client, validAuthorizeParams())
+	second := begin(t, p, client, validAuthorizeParams())
+	if code := selectPersona(t, p, client, first, "acme-admin"); code == "" {
+		t.Fatal("first interaction did not produce a code")
+	}
+	if code := selectPersona(t, p, client, second, "operator"); code == "" {
+		t.Fatal("second interaction did not produce a code")
+	}
+}
+
 func TestExpiredCodeAndInteractionTampering(t *testing.T) {
 	p := newTestProvider(t, 5*time.Millisecond)
 	client := browserClient(t)
-	csrf := begin(t, p, client, validAuthorizeParams())
-	response, err := client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {"wrong"}, "persona": {"operator"}})
+	interaction := begin(t, p, client, validAuthorizeParams())
+	response, err := client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {"wrong"}, "interaction_id": {interaction.id}, "persona": {"operator"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +426,7 @@ func TestExpiredCodeAndInteractionTampering(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("forged selection status %d", response.StatusCode)
 	}
-	response, err = client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {csrf}, "persona": {"not-a-persona"}})
+	response, err = client.PostForm(p.baseURL+"/oauth2/auth/select", url.Values{"csrf": {interaction.csrf}, "interaction_id": {interaction.id}, "persona": {"not-a-persona"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +435,7 @@ func TestExpiredCodeAndInteractionTampering(t *testing.T) {
 		t.Fatalf("modified persona status %d", response.StatusCode)
 	}
 	// Failed tampering submissions do not consume a valid interaction.
-	code := selectPersona(t, p, client, csrf, "acme-admin")
+	code := selectPersona(t, p, client, interaction, "acme-admin")
 	time.Sleep(20 * time.Millisecond)
 	result := exchange(t, p, client, code, verifier)
 	if result["_status"] != float64(http.StatusBadRequest) && result["_status"] != http.StatusBadRequest {
@@ -394,6 +463,16 @@ func TestCORSAndLogoutValidation(t *testing.T) {
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid logout redirect status %d", response.StatusCode)
 	}
+	client := browserClient(t)
+	request, _ = http.NewRequest(http.MethodGet, p.baseURL+"/logout?client_id=dashboard&post_logout_redirect_uri="+url.QueryEscape("http://127.0.0.1:5173/")+"&state=logout-state", nil)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusFound || !strings.Contains(response.Header.Get("Location"), "state=logout-state") {
+		t.Fatalf("logout did not preserve state: status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
 }
 
 func TestOfflineAccessRefreshRotationAndReuseRejection(t *testing.T) {
@@ -401,8 +480,8 @@ func TestOfflineAccessRefreshRotationAndReuseRejection(t *testing.T) {
 	client := browserClient(t)
 	params := validAuthorizeParams()
 	params.Set("scope", "openid profile email offline_access")
-	csrf := begin(t, p, client, params)
-	code := selectPersona(t, p, client, csrf, "acme-admin")
+	interaction := begin(t, p, client, params)
+	code := selectPersona(t, p, client, interaction, "acme-admin")
 	initial := exchange(t, p, client, code, verifier)
 	if initial["_status"] != http.StatusOK || initial["refresh_token"] == nil {
 		t.Fatalf("offline_access did not issue refresh token: %#v", initial)
@@ -420,6 +499,32 @@ func TestOfflineAccessRefreshRotationAndReuseRejection(t *testing.T) {
 	if response.StatusCode != http.StatusOK || rotated["refresh_token"] == refresh || rotated["id_token"] == nil {
 		t.Fatalf("refresh did not rotate correctly: status=%d body=%#v", response.StatusCode, rotated)
 	}
+	rotatedRefresh := rotated["refresh_token"].(string)
+	statuses := make(chan int, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			response, err := http.PostForm(p.baseURL+"/oauth2/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {"dashboard"}, "refresh_token": {rotatedRefresh}})
+			if err != nil {
+				statuses <- 0
+				return
+			}
+			response.Body.Close()
+			statuses <- response.StatusCode
+		})
+	}
+	wg.Wait()
+	close(statuses)
+	successes := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent refresh successes = %d, want 1", successes)
+	}
+
 	response, err = client.PostForm(p.baseURL+"/oauth2/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {"dashboard"}, "refresh_token": {refresh}})
 	if err != nil {
 		t.Fatal(err)
@@ -427,6 +532,43 @@ func TestOfflineAccessRefreshRotationAndReuseRejection(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("reused refresh token status %d", response.StatusCode)
+	}
+}
+
+func TestRefreshScopeValidationAndDownscoping(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	params := validAuthorizeParams()
+	params.Set("scope", "openid profile email offline_access")
+	interaction := begin(t, p, client, params)
+	code := selectPersona(t, p, client, interaction, "acme-admin")
+	initial := exchange(t, p, client, code, verifier)
+	refresh := initial["refresh_token"].(string)
+
+	response, err := client.PostForm(p.baseURL+"/oauth2/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {"dashboard"}, "refresh_token": {refresh}, "scope": {"openid bogus"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid refresh scope status = %d", response.StatusCode)
+	}
+
+	response, err = client.PostForm(p.baseURL+"/oauth2/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {"dashboard"}, "refresh_token": {refresh}, "scope": {"openid profile"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var refreshed map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || refreshed["scope"] != "openid profile" {
+		t.Fatalf("refresh downscoping failed: status=%d body=%#v", response.StatusCode, refreshed)
+	}
+	claims := jwtClaims(t, p, refreshed["id_token"].(string))
+	if _, ok := claims["email"]; ok {
+		t.Fatalf("downscoped ID token retained email: %#v", claims)
 	}
 }
 

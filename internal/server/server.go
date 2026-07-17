@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +39,16 @@ type Server struct {
 	clients      map[string]config.Client
 	personas     map[string]config.Persona
 	interactions interactionStore
+	tokenMu      sync.Mutex
 	template     *template.Template
 }
+
+type oidcClient struct {
+	*fosite.DefaultOpenIDConnectClient
+	responseModes []fosite.ResponseModeType
+}
+
+func (c *oidcClient) GetResponseModes() []fosite.ResponseModeType { return c.responseModes }
 
 type session struct {
 	*openid.DefaultSession
@@ -167,10 +178,14 @@ func New(c *config.Config) (*Server, error) {
 	clients := make(map[string]config.Client, len(c.Clients))
 	for _, client := range c.Clients {
 		clients[client.ID] = client
-		store.Clients[client.ID] = &fosite.DefaultClient{
+		baseClient := &fosite.DefaultClient{
 			ID: client.ID, RedirectURIs: client.RedirectURIs, Public: true,
 			GrantTypes: []string{"authorization_code", "refresh_token"}, ResponseTypes: []string{"code"},
 			Scopes: []string{"openid", "profile", "email", "offline_access"}, Audience: []string{c.APIAudience},
+		}
+		store.Clients[client.ID] = &oidcClient{
+			DefaultOpenIDConnectClient: &fosite.DefaultOpenIDConnectClient{DefaultClient: baseClient, TokenEndpointAuthMethod: "none"},
+			responseModes:              []fosite.ResponseModeType{fosite.ResponseModeQuery},
 		}
 	}
 	provider := compose.Compose(fc, store, strategy,
@@ -202,6 +217,10 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.applyUnionCORS(w, r, []string{"GET"}) {
 		return
 	}
@@ -213,10 +232,15 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 		"scopes_supported": []string{"openid", "profile", "email", "offline_access"}, "code_challenge_methods_supported": []string{"S256"},
 		"subject_types_supported": []string{"public"}, "claims_supported": []string{"sub", "email", "email_verified", "name", rolesClaim, "org_id", membershipsClaim},
 		"id_token_signing_alg_values_supported": []string{"RS256"}, "token_endpoint_auth_methods_supported": []string{"none"},
+		"response_modes_supported": []string{"query"}, "request_uri_parameter_supported": false,
 	})
 }
 
 func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.applyUnionCORS(w, r, []string{"GET"}) {
 		return
 	}
@@ -227,7 +251,7 @@ func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	ar, err := s.provider.NewAuthorizeRequest(r.Context(), r)
@@ -248,26 +272,42 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create interaction", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: interactionCookie, Value: id, Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300})
+	http.SetCookie(w, &http.Cookie{Name: interactionCookie + "_" + id, Value: id, Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300})
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.template.Execute(w, struct {
-		Personas []config.Persona
-		CSRF     string
-	}{personasSlice(s.personas), csrf}); err != nil {
+		Personas      []config.Persona
+		CSRF          string
+		InteractionID string
+	}{personasSlice(s.personas), csrf, id}); err != nil {
 		return
 	}
 }
 
 func (s *Server) validateBrowserRequest(r *http.Request) error {
 	q := r.URL.Query()
+	for _, name := range []string{"response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method", "audience", "response_mode"} {
+		if len(q[name]) > 1 {
+			return fosite.ErrInvalidRequest.WithHintf("%s must not be repeated", name)
+		}
+	}
 	if q.Get("redirect_uri") == "" {
 		return fosite.ErrInvalidRequest.WithHint("redirect_uri is required")
 	}
 	if q.Get("response_type") != "code" {
 		return fosite.ErrInvalidRequest.WithHint("only response_type=code is supported")
 	}
-	if q.Get("code_challenge") == "" || q.Get("code_challenge_method") != "S256" {
+	challenge := q.Get("code_challenge")
+	if challenge == "" || q.Get("code_challenge_method") != "S256" {
 		return fosite.ErrInvalidRequest.WithHint("PKCE S256 code_challenge is required")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(challenge)
+	if err != nil || len(challenge) != 43 || len(decoded) != 32 {
+		return fosite.ErrInvalidRequest.WithHint("code_challenge must be a SHA-256 base64url value")
+	}
+	client, ok := s.clients[q.Get("client_id")]
+	if ok && !contains(client.RedirectURIs, q.Get("redirect_uri")) {
+		return fosite.ErrInvalidRequest.WithHint("redirect_uri must exactly match a registered redirect_uri")
 	}
 	if nonce := q.Get("nonce"); nonce != "" && len(nonce) < fosite.MinParameterEntropy {
 		return fosite.ErrInvalidRequest.WithHint("nonce must have sufficient entropy")
@@ -280,15 +320,20 @@ func (s *Server) validateBrowserRequest(r *http.Request) error {
 
 func (s *Server) selectPersona(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	cookie, err := r.Cookie(interactionCookie)
-	if err != nil {
+	interactionID := r.Form.Get("interaction_id")
+	if !validInteractionID(interactionID) {
+		http.Error(w, "invalid interaction", http.StatusForbidden)
+		return
+	}
+	cookie, err := r.Cookie(interactionCookie + "_" + interactionID)
+	if err != nil || cookie.Value != interactionID {
 		http.Error(w, "invalid interaction", http.StatusForbidden)
 		return
 	}
@@ -297,12 +342,12 @@ func (s *Server) selectPersona(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown persona", http.StatusBadRequest)
 		return
 	}
-	ar, ok := s.interactions.take(cookie.Value, r.Form.Get("csrf"))
+	ar, ok := s.interactions.take(interactionID, r.Form.Get("csrf"))
 	if !ok {
 		http.Error(w, "invalid interaction", http.StatusForbidden)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: interactionCookie, Value: "", Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: interactionCookie + "_" + interactionID, Value: "", Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	for _, scope := range ar.GetRequestedScopes() {
 		ar.GrantScope(scope)
 	}
@@ -351,13 +396,40 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	for _, name := range []string{"grant_type", "client_id", "client_secret", "code", "redirect_uri", "code_verifier", "refresh_token", "scope"} {
+		if len(r.Form[name]) > 1 {
+			s.provider.WriteAccessError(r.Context(), w, nil, fosite.ErrInvalidRequest.WithHintf("%s must not be repeated", name))
+			return
+		}
+	}
+	requestedScope, scopeProvided := r.Form["scope"]
+
+	// MemoryStore does not provide transactional refresh-token rotation. Serialize
+	// token handling so a refresh token cannot be exchanged concurrently.
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
 	accessRequest, err := s.provider.NewAccessRequest(r.Context(), r, newSession())
 	if err != nil {
 		s.provider.WriteAccessError(r.Context(), w, accessRequest, err)
 		return
+	}
+	if accessRequest.GetGrantTypes().Has("refresh_token") {
+		if err := applyRefreshScope(accessRequest, requestedScope, scopeProvided); err != nil {
+			s.provider.WriteAccessError(r.Context(), w, accessRequest, err)
+			return
+		}
+		if session, ok := accessRequest.GetSession().(*session); ok {
+			session.JWTClaims.IssuedAt = time.Time{}
+			session.JWTClaims.JTI = ""
+			removeScopeClaims(session, accessRequest.GetGrantedScopes())
+		}
 	}
 	response, err := s.provider.NewAccessResponse(r.Context(), accessRequest)
 	if err != nil {
@@ -373,10 +445,15 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
 		return
 	}
-	token := fosite.AccessTokenFromRequest(r)
+	token, err := bearerToken(r)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_request"`)
+		http.Error(w, "invalid bearer token transport", http.StatusBadRequest)
+		return
+	}
 	_, accessRequest, err := s.provider.IntrospectToken(r.Context(), token, fosite.AccessToken, newSession())
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
@@ -392,10 +469,23 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid session", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	result := map[string]interface{}{"sub": session.GetSubject()}
-	for _, key := range []string{"email", "email_verified", "name", rolesClaim, "org_id", membershipsClaim} {
+	for _, key := range []string{rolesClaim, "org_id", membershipsClaim} {
 		if value, ok := session.Claims.Extra[key]; ok {
 			result[key] = value
+		}
+	}
+	if accessRequest.GetGrantedScopes().Has("email") {
+		for _, key := range []string{"email", "email_verified"} {
+			if value, ok := session.Claims.Extra[key]; ok {
+				result[key] = value
+			}
+		}
+	}
+	if accessRequest.GetGrantedScopes().Has("profile") {
+		if value, ok := session.Claims.Extra["name"]; ok {
+			result["name"] = value
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -403,10 +493,9 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: interactionCookie, Value: "", Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	uri, clientID := r.URL.Query().Get("post_logout_redirect_uri"), r.URL.Query().Get("client_id")
 	if uri == "" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -417,7 +506,17 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unregistered post_logout_redirect_uri", http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, uri, http.StatusFound)
+	redirect, err := url.Parse(uri)
+	if err != nil {
+		http.Error(w, "invalid post_logout_redirect_uri", http.StatusBadRequest)
+		return
+	}
+	if state := r.URL.Query().Get("state"); state != "" {
+		query := redirect.Query()
+		query.Set("state", state)
+		redirect.RawQuery = query.Encode()
+	}
+	http.Redirect(w, r, redirect.String(), http.StatusFound)
 }
 
 func (s *Server) validPostLogoutURI(clientID, target string) bool {
@@ -477,9 +576,7 @@ func (s *Server) applyClientCORS(w http.ResponseWriter, r *http.Request, client 
 		return true
 	}
 	if !contains(client.AllowedOrigins, origin) {
-		if r.Method == http.MethodOptions {
-			http.Error(w, "origin not allowed", http.StatusForbidden)
-		}
+		http.Error(w, "origin not allowed", http.StatusForbidden)
 		return false
 	}
 	setCORS(w, origin, methods)
@@ -497,6 +594,11 @@ func setCORS(w http.ResponseWriter, origin string, methods []string) {
 }
 
 func writeNoContent(w http.ResponseWriter) bool { w.WriteHeader(http.StatusNoContent); return false }
+
+func methodNotAllowed(w http.ResponseWriter, methods string) {
+	w.Header().Set("Allow", methods)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -520,13 +622,72 @@ func contains(values []string, wanted string) bool {
 	}
 	return false
 }
+
+func validInteractionID(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func applyRefreshScope(request fosite.AccessRequester, values []string, provided bool) error {
+	if !provided {
+		return nil
+	}
+	scopes := fosite.Arguments(strings.Fields(values[0]))
+	if len(scopes) == 0 {
+		return fosite.ErrInvalidScope.WithHint("scope must not be empty")
+	}
+	for _, scope := range scopes {
+		if !request.GetGrantedScopes().Has(scope) {
+			return fosite.ErrInvalidScope.WithHint("refresh scope must be granted by the original authorization")
+		}
+	}
+	refresh, ok := request.(*fosite.AccessRequest)
+	if !ok {
+		return fosite.ErrServerError.WithHint("unexpected refresh request type")
+	}
+	refresh.RequestedScope = scopes
+	refresh.GrantedScope = scopes
+	return nil
+}
+
+func removeScopeClaims(session *session, scopes fosite.Arguments) {
+	if !scopes.Has("email") {
+		delete(session.Claims.Extra, "email")
+		delete(session.Claims.Extra, "email_verified")
+	}
+	if !scopes.Has("profile") {
+		delete(session.Claims.Extra, "name")
+	}
+}
+
+func bearerToken(r *http.Request) (string, error) {
+	if r.URL.Query().Has("access_token") {
+		return "", fmt.Errorf("query access tokens are not supported")
+	}
+	if err := r.ParseForm(); err != nil {
+		return "", err
+	}
+	if _, ok := r.PostForm["access_token"]; ok {
+		return "", fmt.Errorf("form access tokens are not supported")
+	}
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") || strings.TrimSpace(strings.TrimPrefix(values[0], "Bearer ")) == "" {
+		return "", fmt.Errorf("exactly one bearer authorization header is required")
+	}
+	return strings.TrimSpace(strings.TrimPrefix(values[0], "Bearer ")), nil
+}
+
 func personasSlice(m map[string]config.Persona) []config.Persona {
 	result := make([]config.Persona, 0, len(m))
 	for _, p := range m {
 		result = append(result, p)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
 }
 
 var personaTemplate = template.Must(template.New("persona").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Select a test persona</title><style>body{font-family:system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem}ul{padding:0;list-style:none}li{border:1px solid #ccd;border-radius:.5rem;margin:.75rem 0;padding:1rem}button{font:inherit;padding:.45rem .8rem;cursor:pointer}.meta{color:#445;margin:.25rem 0}.roles{font-family:ui-monospace,monospace}</style></head><body><main><h1>Select a test persona</h1><p>This local development server will complete a real OpenID Connect authorization flow.</p><ul>{{range .Personas}}<li><strong>{{.Name}}</strong><div class="meta">{{.Email}}</div><div class="meta roles">roles: {{range $i, $r := .Roles}}{{if $i}}, {{end}}{{$r}}{{end}}</div>{{if .OrganizationID}}<div class="meta">organization: {{.OrganizationID}}</div>{{end}}{{if .Memberships}}<div class="meta">memberships: {{range $i, $m := .Memberships}}{{if $i}}, {{end}}{{$m}}{{end}}</div>{{end}}<form method="post" action="/oauth2/auth/select"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button name="persona" value="{{.ID}}" type="submit">Continue as {{.Name}}</button></form></li>{{end}}</ul></main></body></html>`))
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Select a test persona</title><style>body{font-family:system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem}ul{padding:0;list-style:none}li{border:1px solid #ccd;border-radius:.5rem;margin:.75rem 0;padding:1rem}button{font:inherit;padding:.45rem .8rem;cursor:pointer}.meta{color:#445;margin:.25rem 0}.roles{font-family:ui-monospace,monospace}</style></head><body><main><h1>Select a test persona</h1><p>This local development server will complete a real OpenID Connect authorization flow.</p><ul>{{range .Personas}}<li><strong>{{.Name}}</strong><div class="meta">{{.Email}}</div><div class="meta roles">roles: {{range $i, $r := .Roles}}{{if $i}}, {{end}}{{$r}}{{end}}</div>{{if .OrganizationID}}<div class="meta">organization: {{.OrganizationID}}</div>{{end}}{{if .Memberships}}<div class="meta">memberships: {{range $i, $m := .Memberships}}{{if $i}}, {{end}}{{$m}}{{end}}</div>{{end}}<form method="post" action="/oauth2/auth/select"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="interaction_id" value="{{$.InteractionID}}"><button name="persona" value="{{.ID}}" type="submit">Continue as {{.Name}}</button></form></li>{{end}}</ul></main></body></html>`))
