@@ -1,0 +1,57 @@
+issuer: http://127.0.0.1:8181
+api_audience: https://api.optimicdn.test
+token_ttl: 15m
+authorization_code_ttl: 5m
+refresh_token_ttl: 8h
+
+clients:
+  - id: dashboard
+    name: Optimi Dashboard
+    public: true
+    redirect_uris:
+      - http://127.0.0.1:5173/auth/callback
+    post_logout_redirect_uris:
+      - http://127.0.0.1:5173/
+    allowed_origins:
+      - http://127.0.0.1:5173
+
+personas:
+  - id: platform-admin
+    subject: testoidc|platform-admin
+    email: platform-admin@dev.optimi.test
+    name: Platform Admin
+    roles: [platform-admin]
+
+  - id: operator
+    subject: testoidc|operator
+    email: operator@dev.optimi.test
+    name: Operations User
+    roles: [operator]
+
+  - id: account-manager-acme
+    subject: testoidc|account-manager-acme
+    email: account-manager@dev.optimi.test
+    name: Acme Account Manager
+    roles: [account-manager]
+    memberships: [org_acme]
+
+  - id: acme-admin
+    subject: testoidc|acme-admin
+    email: admin@acme.dev.optimi.test
+    name: Acme Administrator
+    organization_id: org_acme
+    roles: [customer-admin]
+
+  - id: acme-viewer
+    subject: testoidc|acme-viewer
+    email: viewer@acme.dev.optimi.test
+    name: Acme Viewer
+    organization_id: org_acme
+    roles: [customer-viewer]
+
+  - id: bravo-admin
+    subject: testoidc|bravo-admin
+    email: admin@bravo.dev.optimi.test
+    name: Bravo Administrator
+    organization_id: org_bravo
+    roles: [customer-admin]
