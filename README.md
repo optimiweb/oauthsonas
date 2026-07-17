@@ -34,8 +34,8 @@ The Containerfile intentionally sets `TESTOIDC_ALLOW_NON_LOOPBACK=true`, because
 Published releases are available from GitHub Container Registry after a SemVer Git tag is pushed:
 
 ```sh
-podman pull ghcr.io/mod/oauthsonas:1.2.3
-podman run --rm -p 127.0.0.1:8181:8181 ghcr.io/mod/oauthsonas:1.2.3
+podman pull ghcr.io/optimiweb/oauthsonas:1.2.3
+podman run --rm -p 127.0.0.1:8181:8181 ghcr.io/optimiweb/oauthsonas:1.2.3
 ```
 
 Pushing `v1.2.3` publishes `1.2.3`, `1.2`, `1`, and `latest`. Pre-release tags such as `v1.2.3-rc.1` publish their exact version only and do not move `latest`.
