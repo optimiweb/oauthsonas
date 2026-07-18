@@ -501,7 +501,7 @@ func TestPersonaPickerSecurityHeaders(t *testing.T) {
 	defer response.Body.Close()
 	for header, want := range map[string]string{
 		"Cache-Control":           "no-store",
-		"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action " + p.baseURL + "; base-uri 'none'; frame-ancestors 'none'",
+		"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
 		"Referrer-Policy":         "no-referrer",
 		"X-Content-Type-Options":  "nosniff",
 		"X-Frame-Options":         "DENY",
