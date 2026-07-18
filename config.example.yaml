@@ -4,6 +4,12 @@ token_ttl: 15m
 authorization_code_ttl: 5m
 refresh_token_ttl: 8h
 
+# Optional claim name overrides (defaults shown).
+# claims:
+#   roles: roles
+#   memberships: memberships
+#   org_id: org_id
+
 clients:
   - id: dashboard
     name: Optimi Dashboard

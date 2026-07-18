@@ -101,3 +101,44 @@ func TestValidateAllowsFixedRedirectQuery(t *testing.T) {
 		t.Fatalf("fixed redirect query rejected: %v", err)
 	}
 }
+
+func TestValidateAppliesDefaultClaimNames(t *testing.T) {
+	c := &Config{
+		Issuer:      "http://127.0.0.1:8181",
+		APIAudience: "https://api.example.test",
+		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback"}}},
+		Personas:    []Persona{{ID: "user", Subject: "oauthsonas|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if c.Claims.Roles != "roles" || c.Claims.Memberships != "memberships" || c.Claims.OrgID != "org_id" {
+		t.Fatalf("unexpected claim defaults: %#v", c.Claims)
+	}
+}
+
+func TestValidateRejectsDuplicateClaimNames(t *testing.T) {
+	c := &Config{
+		Issuer:      "http://127.0.0.1:8181",
+		APIAudience: "https://api.example.test",
+		Claims:      Claims{Roles: "roles", Memberships: "roles", OrgID: "org_id"},
+		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback"}}},
+		Personas:    []Persona{{ID: "user", Subject: "oauthsonas|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "distinct claim names") {
+		t.Fatalf("duplicate claim names accepted: %v", err)
+	}
+}
+
+func TestValidateAllowsCustomClaimNames(t *testing.T) {
+	c := &Config{
+		Issuer:      "http://127.0.0.1:8181",
+		APIAudience: "https://api.example.test",
+		Claims:      Claims{Roles: "https://example.test/roles", Memberships: "https://example.test/memberships", OrgID: "organization_id"},
+		Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback"}}},
+		Personas:    []Persona{{ID: "user", Subject: "oauthsonas|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("custom claim names rejected: %v", err)
+	}
+}

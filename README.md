@@ -6,7 +6,7 @@
 
 - Replace an external OIDC provider during local development and integration tests without bypassing the relying party's real browser flow.
 - Exercise discovery, Authorization Code + S256 PKCE, callback-state preservation, token exchange, JWKS validation, userinfo, logout, and refresh-token rotation.
-- Provide stable application claims compatible with the future Auth0 post-login contract: `https://myo.optimicdn.com/roles`, optional `org_id`, and optional memberships.
+- Provide stable application claims (`roles`, optional `org_id`, optional `memberships`) with configurable claim names.
 - Keep identities reproducible in YAML while leaving application authorization and role-to-permission expansion to the relying application.
 - Remain intentionally minimal: no database, password authentication, user provisioning, Auth0 Management API, or production deployment support.
 
@@ -117,18 +117,65 @@ Client `redirect_uris` and `post_logout_redirect_uris` are exact-match registrat
 
 The server generates a 2048-bit RSA key when it starts and publishes its public component through `/.well-known/jwks.json`. Access and ID tokens are signed with RS256 and include a process-lifetime `kid`; neither unsigned nor symmetric JWTs are produced.
 
-The stable authorization boundary is:
+### Application claims
+
+Persona attributes are emitted as JWT and userinfo claims. By default the claim names are generic:
+
+| Persona field      | Default claim name | When emitted                          |
+|--------------------|--------------------|---------------------------------------|
+| `roles`            | `roles`            | Always (at least one role required)   |
+| `organization_id`  | `org_id`           | Only when set on the persona          |
+| `memberships`      | `memberships`      | Only when set on the persona          |
+
+Example access-token payload with defaults:
 
 ```json
 {
-  "https://myo.optimicdn.com/roles": ["customer-admin"],
+  "roles": ["customer-admin"],
   "org_id": "org_acme"
 }
 ```
 
-`org_id` is omitted for staff personas. `https://myo.optimicdn.com/memberships` is emitted only when configured. `email` and `email_verified` require the `email` scope; `name` requires `profile`. OAuth scopes remain protocol scopes and do not encode application permissions.
+`org_id` is omitted for staff personas that have no `organization_id`. `memberships` is omitted unless the persona lists them.
 
-JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OIDC representation: access tokens target the configured `api_audience`; ID tokens target the client ID. Future Auth0 post-login Actions should emit the exact namespaced roles-array claim and `org_id` shape above.
+### Configuring claim names
+
+Override claim names with an optional top-level `claims` block in the YAML config. Every field is optional; omitted fields keep the defaults above.
+
+```yaml
+claims:
+  roles: roles
+  memberships: memberships
+  org_id: org_id
+```
+
+Use namespaced URLs when a consumer (for example Auth0-style custom claims) requires them:
+
+```yaml
+claims:
+  roles: https://myo.optimicdn.com/roles
+  memberships: https://myo.optimicdn.com/memberships
+  org_id: org_id
+```
+
+Rules:
+
+- Claim names must be non-empty and must not contain whitespace.
+- The three configured names must be distinct from each other.
+- The same names appear in access tokens, ID tokens, userinfo, and discovery `claims_supported`.
+- Persona YAML fields (`roles`, `organization_id`, `memberships`) stay the same; only the emitted JWT claim keys change.
+
+Validate a config after changing claim names:
+
+```sh
+go run ./cmd/oauthsonas --config config.yaml --check-config
+```
+
+### Scope-gated profile claims
+
+`email` and `email_verified` require the `email` scope; `name` requires `profile`. OAuth scopes remain protocol scopes and do not encode application permissions.
+
+JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OIDC representation: access tokens target the configured `api_audience`; ID tokens target the client ID.
 
 ## Protocol behavior
 

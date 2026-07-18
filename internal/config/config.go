@@ -19,11 +19,19 @@ type Config struct {
 	AuthorizationCodeTTL    string        `yaml:"authorization_code_ttl"`
 	RefreshTokenTTL         string        `yaml:"refresh_token_ttl"`
 	AllowedRoles            []string      `yaml:"allowed_roles"`
+	Claims                  Claims        `yaml:"claims"`
 	Clients                 []Client      `yaml:"clients"`
 	Personas                []Persona     `yaml:"personas"`
 	TokenTTLDuration        time.Duration `yaml:"-"`
 	AuthorizationCodeTTLD   time.Duration `yaml:"-"`
 	RefreshTokenTTLDuration time.Duration `yaml:"-"`
+}
+
+// Claims configures JWT/userinfo claim names for application attributes.
+type Claims struct {
+	Roles       string `yaml:"roles"`
+	Memberships string `yaml:"memberships"`
+	OrgID       string `yaml:"org_id"`
 }
 
 type Client struct {
@@ -94,6 +102,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if c.RefreshTokenTTLDuration, err = parseDuration(c.RefreshTokenTTL, "refresh_token_ttl", 8*time.Hour); err != nil {
+		return err
+	}
+	if err := c.Claims.applyDefaults(); err != nil {
 		return err
 	}
 	if len(c.Clients) == 0 {
@@ -168,6 +179,39 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("persona %q has unsupported role %q", p.ID, role)
 			}
 		}
+	}
+	return nil
+}
+
+func (c *Claims) applyDefaults() error {
+	if c.Roles == "" {
+		c.Roles = "roles"
+	}
+	if c.Memberships == "" {
+		c.Memberships = "memberships"
+	}
+	if c.OrgID == "" {
+		c.OrgID = "org_id"
+	}
+	names := []struct {
+		field, value string
+	}{
+		{"claims.roles", c.Roles},
+		{"claims.memberships", c.Memberships},
+		{"claims.org_id", c.OrgID},
+	}
+	seen := map[string]string{}
+	for _, name := range names {
+		if strings.TrimSpace(name.value) != name.value || name.value == "" {
+			return fmt.Errorf("%s must be a non-empty claim name", name.field)
+		}
+		if strings.ContainsAny(name.value, " \t\r\n") {
+			return fmt.Errorf("%s must not contain whitespace", name.field)
+		}
+		if other, ok := seen[name.value]; ok {
+			return fmt.Errorf("%s and %s must use distinct claim names", other, name.field)
+		}
+		seen[name.value] = name.field
 	}
 	return nil
 }

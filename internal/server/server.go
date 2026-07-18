@@ -26,11 +26,7 @@ import (
 	"github.com/ory/fosite/token/jwt"
 )
 
-const (
-	rolesClaim        = "https://myo.optimicdn.com/roles"
-	membershipsClaim  = "https://myo.optimicdn.com/memberships"
-	interactionCookie = "oauthsonas_interaction"
-)
+const interactionCookie = "oauthsonas_interaction"
 
 type Server struct {
 	config       *config.Config
@@ -237,7 +233,7 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 		"userinfo_endpoint": endpoint + "/userinfo", "jwks_uri": endpoint + "/.well-known/jwks.json", "end_session_endpoint": endpoint + "/logout",
 		"response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"},
 		"scopes_supported": []string{"openid", "profile", "email", "offline_access"}, "code_challenge_methods_supported": []string{"S256"},
-		"subject_types_supported": []string{"public"}, "claims_supported": []string{"sub", "email", "email_verified", "name", rolesClaim, "org_id", membershipsClaim},
+		"subject_types_supported": []string{"public"}, "claims_supported": []string{"sub", "email", "email_verified", "name", s.config.Claims.Roles, s.config.Claims.OrgID, s.config.Claims.Memberships},
 		"id_token_signing_alg_values_supported": []string{"RS256"}, "token_endpoint_auth_methods_supported": []string{"none"},
 		"response_modes_supported": []string{"query"}, "request_uri_parameter_supported": false,
 	})
@@ -387,6 +383,9 @@ func (s *Server) personaSession(p config.Persona, ar fosite.AuthorizeRequester) 
 	claims.Subject = p.Subject
 	claims.Extra["client_id"] = ar.GetClient().GetID()
 	roles := append([]string(nil), p.Roles...)
+	rolesClaim := s.config.Claims.Roles
+	orgClaim := s.config.Claims.OrgID
+	membershipsClaim := s.config.Claims.Memberships
 	claims.Extra[rolesClaim] = roles
 	session.Claims.Extra = map[string]interface{}{rolesClaim: roles}
 	if ar.GetGrantedScopes().Has("email") {
@@ -397,8 +396,8 @@ func (s *Server) personaSession(p config.Persona, ar fosite.AuthorizeRequester) 
 		session.Claims.Extra["name"] = p.Name
 	}
 	if p.OrganizationID != "" {
-		claims.Extra["org_id"] = p.OrganizationID
-		session.Claims.Extra["org_id"] = p.OrganizationID
+		claims.Extra[orgClaim] = p.OrganizationID
+		session.Claims.Extra[orgClaim] = p.OrganizationID
 	}
 	if len(p.Memberships) != 0 {
 		memberships := append([]string(nil), p.Memberships...)
@@ -488,7 +487,7 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	result := map[string]interface{}{"sub": session.GetSubject()}
-	for _, key := range []string{rolesClaim, "org_id", membershipsClaim} {
+	for _, key := range []string{s.config.Claims.Roles, s.config.Claims.OrgID, s.config.Claims.Memberships} {
 		if value, ok := session.Claims.Extra[key]; ok {
 			result[key] = value
 		}

@@ -225,13 +225,13 @@ func TestDiscoveryAndFullAuthorizationCodeFlow(t *testing.T) {
 	if _, ok := access["email"]; ok {
 		t.Fatalf("access token must not contain profile claims: %#v", access)
 	}
-	if !containsString(access["aud"], "https://api.optimicdn.test") || !containsString(access[rolesClaim], "customer-admin") || access["org_id"] != "org_acme" {
+	if !containsString(access["aud"], "https://api.optimicdn.test") || !containsString(access["roles"], "customer-admin") || access["org_id"] != "org_acme" {
 		t.Fatalf("bad access claims: %#v", access)
 	}
 	if id["iss"] != p.baseURL || id["sub"] != "oauthsonas|acme-admin" || id["nonce"] != "nonce-value-123" || !containsString(id["aud"], "dashboard") {
 		t.Fatalf("bad id claims: %#v", id)
 	}
-	if id["email"] != "admin@acme.dev.optimi.test" || id["name"] != "Acme Administrator" || !containsString(id[rolesClaim], "customer-admin") || id["org_id"] != "org_acme" {
+	if id["email"] != "admin@acme.dev.optimi.test" || id["name"] != "Acme Administrator" || !containsString(id["roles"], "customer-admin") || id["org_id"] != "org_acme" {
 		t.Fatalf("bad id claims: %#v", id)
 	}
 
@@ -323,7 +323,7 @@ func TestOAuth2ClientAuthorizationCodeFlow(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&userinfo); err != nil {
 		t.Fatal(err)
 	}
-	if userinfo["email"] != "admin@acme.dev.optimi.test" || userinfo[rolesClaim] == nil {
+	if userinfo["email"] != "admin@acme.dev.optimi.test" || userinfo["roles"] == nil {
 		t.Fatalf("unexpected OAuth2 userinfo: %#v", userinfo)
 	}
 }
