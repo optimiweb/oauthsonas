@@ -1,5 +1,5 @@
 issuer: http://127.0.0.1:8181
-api_audience: https://api.optimicdn.test
+api_audience: https://api.example.test
 token_ttl: 15m
 authorization_code_ttl: 5m
 refresh_token_ttl: 8h
@@ -8,6 +8,12 @@ refresh_token_ttl: 8h
 # claims:
 #   roles: roles
 #   memberships: memberships
+#   org_id: org_id
+#
+# Optimi platform namespaced claims:
+# claims:
+#   roles: https://example.com/roles
+#   memberships: https://example.com/memberships
 #   org_id: org_id
 
 clients:

@@ -153,8 +153,8 @@ Use namespaced URLs when a consumer (for example Auth0-style custom claims) requ
 
 ```yaml
 claims:
-  roles: https://myo.optimicdn.com/roles
-  memberships: https://myo.optimicdn.com/memberships
+  roles: https://example.com/roles
+  memberships: https://example.com/memberships
   org_id: org_id
 ```
 
