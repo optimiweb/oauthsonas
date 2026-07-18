@@ -36,6 +36,10 @@ jobs:
           context: .
           file: Containerfile
           push: false
+          load: true
+          tags: oauthsonas:ci
+      - name: Smoke test container
+        run: ./test/e2e/smoke.sh oauthsonas:ci
 
   publish:
     name: Publish GHCR image

@@ -63,18 +63,18 @@ The default issuer is exactly `http://127.0.0.1:8181`. Do not substitute `localh
 
 ```sh
 podman build -t oauthsonas -f Containerfile .
-podman run --rm -p 127.0.0.1:8181:8181 oauthsonas
+podman run --rm -p 127.0.0.1:8181:8181 -e OAUTHSONAS_ALLOW_NON_LOOPBACK=true oauthsonas
 ```
 
 Docker uses the same commands with `docker` in place of `podman`.
 
-The Containerfile intentionally sets `OAUTHSONAS_ALLOW_NON_LOOPBACK=true`, because a container must bind to `0.0.0.0` for its loopback-only published port to be reachable. Keep the published port loopback-bound as shown.
+The container binds to `0.0.0.0` for port-forwarding to work. You must explicitly set `OAUTHSONAS_ALLOW_NON_LOOPBACK=true` to acknowledge the non-loopback exposure. Keep the published port loopback-bound (`-p 127.0.0.1:8181:8181`) as shown.
 
 Published releases are available from GitHub Container Registry after a SemVer Git tag is pushed:
 
 ```sh
 podman pull ghcr.io/optimiweb/oauthsonas:1.2.3
-podman run --rm -p 127.0.0.1:8181:8181 ghcr.io/optimiweb/oauthsonas:1.2.3
+podman run --rm -p 127.0.0.1:8181:8181 -e OAUTHSONAS_ALLOW_NON_LOOPBACK=true ghcr.io/optimiweb/oauthsonas:1.2.3
 ```
 
 Pushing `v1.2.3` publishes `1.2.3`, `1.2`, `1`, and `latest`. Pre-release tags such as `v1.2.3-rc.1` publish their exact version only and do not move `latest`.
@@ -186,13 +186,93 @@ JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OID
 - Supplying `scope` to a refresh request can only downscope. The narrower scope set becomes the grant for the rotated refresh token.
 - Authorization codes are short-lived and one-time. State is returned unchanged. Nonces are copied to ID tokens.
 - `GET` or `POST /userinfo` validates the bearer access token and returns the granted profile/custom claim subset.
-- `GET /logout` redirects only to a registered `post_logout_redirect_uri` and returns an optional `state` value. It does not represent a persistent authenticated browser session.
+- `GET /logout` redirects only to a registered `post_logout_redirect_uri` and returns an optional `state` value. When an `id_token_hint` is provided, the client is derived from the token's `aud` claim, supporting RP-initiated logout without an explicit `client_id`.
+
+## Health and readiness
+
+`GET /healthz` returns 200 with JSON payload:
+
+```json
+{"status":"ok","version":"1.0.0","issuer":"http://127.0.0.1:8181","uptime":"5m23s"}
+```
+
+`GET /readyz` returns 200 once the server is ready to accept requests:
+
+```json
+{"status":"ready","issuer":"http://127.0.0.1:8181"}
+```
+
+Use these for Kubernetes probes, health checks, or orchestration signaling. Both endpoints set `Cache-Control: no-store`.
+
+## Structured logging
+
+The server uses `log/slog` with JSON (default) or text output. Control format and level with CLI flags:
+
+```
+--log-format json|text   (default: json)
+--log-level  debug|info|warn|error   (default: info)
+```
+
+Log attributes for each request: `method`, `path`, `status`, `duration`. Additional attributes on OAuth events:
+
+| Event | Attributes logged |
+|---|---|
+| `authorize` | `client_id`, `interaction_id` (truncated), `status`, `error_category` |
+| `select_persona` | `client_id`, `persona_id`, `interaction_id` (truncated), `status` |
+| `token` | `client_id`, `grant_type`, `status`, `error_category` |
+| `logout` | `client_id`, `status` |
+
+Never logged: authorization codes, access tokens, refresh tokens, ID tokens, cookies, CSRF values, or PKCE verifiers.
+
+## Kubernetes deployment
+
+OAuthSonas is designed for single-replica deployments only. Constraints:
+
+- **One replica max.** All protocol state (tokens, authorization codes, interactions, signing keys) is process-local and in-memory. Running multiple replicas behind a load balancer will cause interaction cookie mismatches, invalid token signatures, and undefined behavior.
+- **No rolling surge.** Deployments must use `strategy: Recreate`. A second pod started alongside the old one would generate a different signing key and break JWKS validation.
+- **No shared load balancing** across instances.
+- **Restart invalidates everything.** All issued tokens, authorization codes, and interactions are lost on restart.
+- **Use `/healthz` for liveness** and **`/readyz` for readiness** probes.
+
+The server performs periodic garbage collection of expired in-memory state. For long-running instances, consider a process lifecycle manager that periodically restarts the pod.
+
+## Browser automation
+
+The persona picker exposes stable selectors for test frameworks. The form contract for `POST /oauth2/auth/select` is versioned (see handler godoc for details).
+
+### Selectors
+
+| Element | Selector |
+|---|---|
+| Persona form container | `form[data-testid="persona-form-<id>"]` or `.persona-form` |
+| CSRF hidden input | `input[data-testid="csrf-input"]` |
+| Interaction ID hidden input | `input[data-testid="interaction-id-input"]` |
+| Submit button | `button[data-testid="persona-select-<id>"]` |
+
+### Flow
+
+1. Navigate to `GET /oauth2/auth?...` with standard OIDC params.
+2. The response page contains one `<form>` per persona with the selectors above.
+3. Extract `csrf` and `interaction_id` from the hidden inputs.
+4. Submit `POST /oauth2/auth/select` with form fields `csrf`, `interaction_id`, and `persona`.
+5. The server responds with a 302 redirect to the registered `redirect_uri` containing `code` and `state`.
+6. Exchange the code at `POST /oauth2/token` as usual.
+
+### Requirements
+
+- The request must include the `oauthsonas_interaction_<id>` cookie set by step 1.
+- The CSRF token is one-shot. Replay returns HTTP 403.
+- Duplicate form parameters are rejected with HTTP 400.
+- Custom claim names must not collide with standard JWT/OIDC claim names (e.g. `sub`, `email`, `scope`, `client_id`).
 
 ## Endpoints
 
+- `GET /healthz`
+- `GET /readyz`
 - `GET /.well-known/openid-configuration`
 - `GET /.well-known/jwks.json`
 - `GET /oauth2/auth`
+- `POST /oauth2/auth/select`
 - `POST /oauth2/token`
 - `GET|POST /userinfo`
 - `GET /logout`

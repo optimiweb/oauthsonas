@@ -213,7 +213,41 @@ func (c *Claims) applyDefaults() error {
 		}
 		seen[name.value] = name.field
 	}
+	for _, name := range names {
+		if isReservedClaim(name.value) {
+			return fmt.Errorf("%s %q collides with a standard JWT/OIDC claim name", name.field, name.value)
+		}
+	}
 	return nil
+}
+
+var reservedClaims = map[string]bool{
+	"sub":           true,
+	"iss":           true,
+	"aud":           true,
+	"exp":           true,
+	"iat":           true,
+	"nbf":           true,
+	"jti":           true,
+	"auth_time":     true,
+	"nonce":         true,
+	"acr":           true,
+	"amr":           true,
+	"azp":           true,
+	"at_hash":       true,
+	"c_hash":        true,
+	"email":         true,
+	"email_verified": true,
+	"name":          true,
+	"client_id":     true,
+	"scope":         true,
+	"kid":           true,
+	"alg":           true,
+	"typ":           true,
+}
+
+func isReservedClaim(name string) bool {
+	return reservedClaims[name]
 }
 
 func parseDuration(raw, field string, fallback time.Duration) (time.Duration, error) {

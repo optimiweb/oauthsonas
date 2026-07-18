@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -25,9 +25,23 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8181", "listen address")
 	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	logFormat := flag.String("log-format", "json", "log format: text or json")
+	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
+
+	level := parseLogLevel(*logLevel)
+	var handler slog.Handler
+	switch *logFormat {
+	case "text":
+		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	default:
+		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	}
+	logger := slog.New(handler)
+
 	if flag.NArg() != 0 {
-		log.Fatalf("unexpected positional arguments: %s", strings.Join(flag.Args(), " "))
+		logger.Error("unexpected positional arguments", "args", strings.Join(flag.Args(), " "))
+		os.Exit(1)
 	}
 	if *showVersion {
 		fmt.Println(version)
@@ -35,20 +49,23 @@ func main() {
 	}
 	c, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
 	if *checkConfig {
-		log.Printf("configuration %s is valid", *configPath)
+		logger.Info("configuration is valid", "path", *configPath)
 		return
 	}
 	if err := validateListenAddress(*listen); err != nil {
-		log.Fatal(err)
+		logger.Error("invalid listen address", "error", err)
+		os.Exit(1)
 	}
-	s, err := server.New(c)
+	s, err := server.New(c, logger, version)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to create server", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("DEVELOPMENT ONLY: serving OIDC issuer %s on http://%s", c.Issuer, *listen)
+	logger.Info("starting developer OIDC provider", "issuer", c.Issuer, "listen", *listen)
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           s.Handler(),
@@ -59,7 +76,8 @@ func main() {
 	}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("listen failed", "error", err)
+		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,15 +86,29 @@ func main() {
 	select {
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			logger.Error("serve failed", "error", err)
+			os.Exit(1)
 		}
 	case <-ctx.Done():
-		log.Printf("shutting down")
+		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("graceful shutdown failed: %v", err)
+			logger.Error("graceful shutdown failed", "error", err)
 		}
+	}
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 

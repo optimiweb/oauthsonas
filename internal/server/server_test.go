@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -45,7 +47,7 @@ func newTestProvider(t *testing.T, codeTTL time.Duration) *testProvider {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(c)
+	s, err := New(c, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,4 +622,130 @@ func containsString(value interface{}, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func TestHealthz(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	response, err := http.Get(p.baseURL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status = %d", response.StatusCode)
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("healthz cache = %q", response.Header.Get("Cache-Control"))
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("healthz status field = %v", body["status"])
+	}
+	if body["version"] != "test" {
+		t.Fatalf("healthz version = %v", body["version"])
+	}
+	if body["issuer"] != p.baseURL {
+		t.Fatalf("healthz issuer = %v", body["issuer"])
+	}
+	if _, ok := body["uptime"]; !ok {
+		t.Fatal("healthz missing uptime")
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	response, err := http.Get(p.baseURL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("readyz status = %d", response.StatusCode)
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("readyz cache = %q", response.Header.Get("Cache-Control"))
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "ready" {
+		t.Fatalf("readyz status field = %v", body["status"])
+	}
+}
+
+func TestSelectPersonaRejectsDuplicateParams(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	interaction := begin(t, p, client, validAuthorizeParams())
+	for _, name := range []string{"csrf", "interaction_id", "persona"} {
+		t.Run(name, func(t *testing.T) {
+			form := url.Values{
+				"csrf":           {interaction.csrf},
+				"interaction_id": {interaction.id},
+				"persona":        {"acme-admin"},
+			}
+			form.Add(name, "duplicate-value")
+			response, err := client.PostForm(p.baseURL+"/oauth2/auth/select", form)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("%s duplicate accepted: %d", name, response.StatusCode)
+			}
+		})
+	}
+}
+
+func TestIDTokenHintLogout(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	_, result := fullFlow(t, p, "acme-admin")
+	idToken := result["id_token"].(string)
+	client := browserClient(t)
+	request, _ := http.NewRequest(http.MethodGet, p.baseURL+"/logout?post_logout_redirect_uri="+url.QueryEscape("http://127.0.0.1:5173/")+"&id_token_hint="+url.QueryEscape(idToken), nil)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("id_token_hint logout status = %d", response.StatusCode)
+	}
+}
+
+func TestPersonaPickerDataAttributes(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	response, err := client.Get(authorizeURL(p.baseURL, validAuthorizeParams()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	for _, want := range []string{
+		`data-testid="csrf-input"`,
+		`data-testid="interaction-id-input"`,
+		`data-testid="persona-form-acme-admin"`,
+		`data-testid="persona-select-acme-admin"`,
+		`data-testid="persona-form-operator"`,
+		`data-testid="persona-select-operator"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("picker missing %s", want)
+		}
+	}
+	for _, want := range []string{
+		`persona-form`,
+		`persona-name`,
+		`persona-email`,
+	} {
+		if !regexp.MustCompile(`class="[^"]*` + want + `[^"]*"`).MatchString(html) {
+			t.Errorf("picker missing class %s", want)
+		}
+	}
 }

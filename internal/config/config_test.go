@@ -142,3 +142,21 @@ func TestValidateAllowsCustomClaimNames(t *testing.T) {
 		t.Fatalf("custom claim names rejected: %v", err)
 	}
 }
+
+func TestValidateRejectsReservedClaimNames(t *testing.T) {
+	reserved := []string{"sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "client_id", "scope", "kid"}
+	for _, name := range reserved {
+		t.Run(name, func(t *testing.T) {
+			c := &Config{
+				Issuer:      "http://127.0.0.1:8181",
+				APIAudience: "https://api.example.test",
+				Claims:      Claims{Roles: name, Memberships: "memberships", OrgID: "org_id"},
+				Clients:     []Client{{ID: "dashboard", Name: "Dashboard", Public: true, RedirectURIs: []string{"http://127.0.0.1:5173/callback"}}},
+				Personas:    []Persona{{ID: "user", Subject: "oauthsonas|user", Email: "user@example.test", Name: "User", Roles: []string{"viewer"}}},
+			}
+			if err := c.Validate(); err == nil {
+				t.Fatalf("reserved claim %q accepted", name)
+			}
+		})
+	}
+}
