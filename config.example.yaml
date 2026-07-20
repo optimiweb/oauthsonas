@@ -4,21 +4,30 @@ token_ttl: 15m
 authorization_code_ttl: 5m
 refresh_token_ttl: 8h
 
-# Optional claim name overrides (defaults shown).
+# Claim names default to bare keys (roles, memberships, org_id).
+# Override them when your relying party expects different keys
+# (for example Auth0-style namespaced custom claims).
 # claims:
 #   roles: roles
 #   memberships: memberships
 #   org_id: org_id
 #
-# Optimi platform namespaced claims:
 # claims:
 #   roles: https://example.com/roles
 #   memberships: https://example.com/memberships
 #   org_id: org_id
 
+# Optional: reject personas that use role names outside this list.
+# allowed_roles:
+#   - platform-admin
+#   - operator
+#   - account-manager
+#   - customer-admin
+#   - customer-viewer
+
 clients:
   - id: dashboard
-    name: Optimi Dashboard
+    name: Example Dashboard
     public: true
     redirect_uris:
       - http://127.0.0.1:5173/auth/callback
@@ -28,42 +37,45 @@ clients:
       - http://127.0.0.1:5173
 
 personas:
+  # Staff / global: roles only, no organization_id.
   - id: platform-admin
     subject: oauthsonas|platform-admin
-    email: platform-admin@dev.optimi.test
+    email: platform-admin@example.test
     name: Platform Admin
     roles: [platform-admin]
 
   - id: operator
     subject: oauthsonas|operator
-    email: operator@dev.optimi.test
+    email: operator@example.test
     name: Operations User
     roles: [operator]
 
+  # Multi-org staff: memberships without a single active org_id.
   - id: account-manager-acme
     subject: oauthsonas|account-manager-acme
-    email: account-manager@dev.optimi.test
+    email: account-manager@example.test
     name: Acme Account Manager
     roles: [account-manager]
     memberships: [org_acme]
 
+  # Customer personas: organization_id becomes the org_id claim.
   - id: acme-admin
     subject: oauthsonas|acme-admin
-    email: admin@acme.dev.optimi.test
+    email: admin@acme.example.test
     name: Acme Administrator
     organization_id: org_acme
     roles: [customer-admin]
 
   - id: acme-viewer
     subject: oauthsonas|acme-viewer
-    email: viewer@acme.dev.optimi.test
+    email: viewer@acme.example.test
     name: Acme Viewer
     organization_id: org_acme
     roles: [customer-viewer]
 
   - id: bravo-admin
     subject: oauthsonas|bravo-admin
-    email: admin@bravo.dev.optimi.test
+    email: admin@bravo.example.test
     name: Bravo Administrator
     organization_id: org_bravo
     roles: [customer-admin]

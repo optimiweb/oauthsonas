@@ -103,7 +103,7 @@ To add a persona, append a unique entry under `personas`:
 ```yaml
   - id: delta-viewer
     subject: oauthsonas|delta-viewer
-    email: viewer@delta.dev.optimi.test
+    email: viewer@delta.example.test
     name: Delta Viewer
     organization_id: org_delta
     roles: [customer-viewer]
@@ -119,13 +119,20 @@ The server generates a 2048-bit RSA key when it starts and publishes its public 
 
 ### Application claims
 
-Persona attributes are emitted as JWT and userinfo claims. By default the claim names are generic:
+Persona attributes are emitted as JWT and userinfo claims. Defaults are intentionally **generic and project-agnostic** so this server stays reusable; your relying party config must read the same claim names you emit.
 
 | Persona field      | Default claim name | When emitted                          |
 |--------------------|--------------------|---------------------------------------|
 | `roles`            | `roles`            | Always (at least one role required)   |
 | `organization_id`  | `org_id`           | Only when set on the persona          |
 | `memberships`      | `memberships`      | Only when set on the persona          |
+
+Semantics (Auth0 Organizations-compatible, no Auth0 RBAC permissions bag):
+
+- **`roles`** — role **names only** (string array). This server never expands roles into application permissions or scopes; the app does that.
+- **`org_id`** — single active organization id when the persona has `organization_id`. Omitted for staff/global personas with no org context (same pattern as Auth0 organization login vs global login).
+- **`memberships`** — optional list of organization ids (for example multi-tenant staff). Independent of `org_id`; not derived from it.
+- **No `permissions` claim** — fine-grained authz stays in the application.
 
 Example access-token payload with defaults:
 
@@ -149,7 +156,7 @@ claims:
   org_id: org_id
 ```
 
-Use namespaced URLs when a consumer (for example Auth0-style custom claims) requires them:
+Use namespaced URLs when a consumer requires Auth0-style custom claims (or any other fixed claim keys). **Match whatever your app's token middleware expects** — bare defaults will not satisfy a middleware looking for namespaced keys:
 
 ```yaml
 claims:
@@ -158,12 +165,15 @@ claims:
   org_id: org_id
 ```
 
+Keep `org_id` un-namespaced when mimicking Auth0 Organizations; Auth0 issues that claim under the short name.
+
 Rules:
 
 - Claim names must be non-empty and must not contain whitespace.
 - The three configured names must be distinct from each other.
 - The same names appear in access tokens, ID tokens, userinfo, and discovery `claims_supported`.
 - Persona YAML fields (`roles`, `organization_id`, `memberships`) stay the same; only the emitted JWT claim keys change.
+- Role **values** are free-form strings unless you set top-level `allowed_roles` for config-time vocabulary checks.
 
 Validate a config after changing claim names:
 
