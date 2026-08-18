@@ -37,6 +37,7 @@ clients:
       - http://127.0.0.1:5173
 
 personas:
+  # Optional: GET /oauth2/auth?…&login_hint=<id> skips the picker.
   # Staff / global: roles only, no organization_id.
   - id: platform-admin
     subject: oauthsonas|platform-admin

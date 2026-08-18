@@ -189,7 +189,7 @@ JWT `aud` values are serialized as JSON arrays by Fosite, which is valid JWT/OID
 
 ## Protocol behavior
 
-- Supported flow: Authorization Code with required S256 PKCE, `response_type=code`, and `openid` scope.
+- Supported flow: Authorization Code with required S256 PKCE, `response_type=code`, and `openid` scope. Optional `login_hint=<persona id>` on `GET /oauth2/auth` completes the request without the persona picker.
 - Standard scopes: `openid`, `profile`, `email`, and optional `offline_access`.
 - `audience` is optional, but if supplied it must exactly equal `api_audience`; access tokens always use that API audience.
 - `offline_access` issues a refresh token. Fosite rotates refresh tokens and detects/rejects reuse.
@@ -227,7 +227,7 @@ Log attributes for each request: `method`, `path`, `status`, `duration`. Additio
 
 | Event | Attributes logged |
 |---|---|
-| `authorize` | `client_id`, `interaction_id` (truncated), `status`, `error_category` |
+| `authorize` | `client_id`, `interaction_id` (truncated), `persona_id` (`status=auto`), `hint_ignored`, `status`, `error_category` |
 | `select_persona` | `client_id`, `persona_id`, `interaction_id` (truncated), `status` |
 | `token` | `client_id`, `grant_type`, `status`, `error_category` |
 | `logout` | `client_id`, `status` |
@@ -260,6 +260,8 @@ The persona picker exposes stable selectors for test frameworks. The form contra
 | Submit button | `button[data-testid="persona-select-<id>"]` |
 
 ### Flow
+
+Optional `login_hint=<persona id>` on `GET /oauth2/auth` skips the picker: the same request 302s to `redirect_uri` with `code` and `state`. Use this from agents and `oidc-client-ts` (`extraQueryParams: { login_hint }`). Unknown or missing hints still render the picker.
 
 1. Navigate to `GET /oauth2/auth?...` with standard OIDC params.
 2. The response page contains one `<form>` per persona with the selectors above.

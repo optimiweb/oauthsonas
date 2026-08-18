@@ -316,6 +316,13 @@ func (s *Server) jwks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{public}})
 }
 
+// authorize handles GET /oauth2/auth, the OIDC authorization endpoint.
+//
+// Optional login_hint=<persona id> (exactly one, ids only) completes the
+// authorize request in the same GET: the handler consumes the interaction it
+// just created and 302/303s to redirect_uri with code and state. No picker,
+// cookie, or POST /oauth2/auth/select is required. Missing or unknown
+// login_hint renders the HTML persona picker unchanged.
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
@@ -364,11 +371,40 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create interaction", http.StatusInternalServerError)
 		return
 	}
-	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "authorize",
-		slog.String("status", "prompt"),
-		slog.String("client_id", ar.GetClient().GetID()),
-		slog.String("interaction_id", id[:8]),
-	)
+	if hint := r.URL.Query().Get("login_hint"); hint != "" {
+		if p, ok := s.personas[hint]; ok {
+			taken, ok := s.interactions.take(id, csrf)
+			if !ok {
+				s.logger.LogAttrs(r.Context(), slog.LevelError, "authorize",
+					slog.String("status", "error"),
+					slog.String("error_category", "internal"),
+					slog.String("client_id", ar.GetClient().GetID()),
+					slog.String("error", "could not consume interaction"),
+				)
+				http.Error(w, "could not create interaction", http.StatusInternalServerError)
+				return
+			}
+			s.logger.LogAttrs(r.Context(), slog.LevelInfo, "authorize",
+				slog.String("status", "auto"),
+				slog.String("client_id", taken.GetClient().GetID()),
+				slog.String("persona_id", p.ID),
+			)
+			s.completeAuthorization(w, r, taken, p)
+			return
+		}
+		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "authorize",
+			slog.String("status", "prompt"),
+			slog.String("client_id", ar.GetClient().GetID()),
+			slog.String("interaction_id", id[:8]),
+			slog.Bool("hint_ignored", true),
+		)
+	} else {
+		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "authorize",
+			slog.String("status", "prompt"),
+			slog.String("client_id", ar.GetClient().GetID()),
+			slog.String("interaction_id", id[:8]),
+		)
+	}
 	http.SetCookie(w, &http.Cookie{Name: interactionCookie + "_" + id, Value: id, Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300})
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
@@ -387,7 +423,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validateBrowserRequest(r *http.Request) error {
 	q := r.URL.Query()
-	for _, name := range []string{"response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method", "audience", "response_mode"} {
+	for _, name := range []string{"response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method", "audience", "response_mode", "login_hint"} {
 		if len(q[name]) > 1 {
 			return fosite.ErrInvalidRequest.WithHintf("%s must not be repeated", name)
 		}
@@ -422,6 +458,10 @@ func (s *Server) validateBrowserRequest(r *http.Request) error {
 // selectPersona handles POST /oauth2/auth/select, the browser-form submission
 // that completes persona selection in the authorization flow.
 //
+// Agents that cannot reliably POST this form should instead pass OIDC
+// login_hint=<persona id> on GET /oauth2/auth, which completes the request
+// without a picker or this endpoint. This POST contract is unchanged.
+//
 // # Browser Automation Contract (v1)
 //
 // The HTML persona picker at GET /oauth2/auth renders a <form> for each
@@ -429,7 +469,7 @@ func (s *Server) validateBrowserRequest(r *http.Request) error {
 //
 //  1. GET /oauth2/auth with standard OIDC authorize params (response_type=code,
 //     client_id, redirect_uri, scope, state, nonce, code_challenge=S256,
-//     code_challenge_method=S256, optional audience).
+//     code_challenge_method=S256, optional audience, optional login_hint).
 //  2. The response is an HTML page with a <form method="post"
 //     action="/oauth2/auth/select"> for each persona.
 //  3. Extract the CSRF token from the hidden <input name="csrf"
@@ -529,11 +569,15 @@ func (s *Server) selectPersona(w http.ResponseWriter, r *http.Request) {
 		slog.String("interaction_id", interactionID[:8]),
 	)
 	http.SetCookie(w, &http.Cookie{Name: interactionCookie + "_" + interactionID, Value: "", Path: "/oauth2", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	s.completeAuthorization(w, r, ar, p)
+}
+
+func (s *Server) completeAuthorization(w http.ResponseWriter, r *http.Request, ar fosite.AuthorizeRequester, persona config.Persona) {
 	for _, scope := range ar.GetRequestedScopes() {
 		ar.GrantScope(scope)
 	}
 	ar.GrantAudience(s.config.APIAudience)
-	session := s.personaSession(p, ar)
+	session := s.personaSession(persona, ar)
 	resp, err := s.provider.NewAuthorizeResponse(r.Context(), ar, session)
 	if err != nil {
 		s.provider.WriteAuthorizeError(r.Context(), w, ar, err)

@@ -717,6 +717,79 @@ func TestIDTokenHintLogout(t *testing.T) {
 	}
 }
 
+func TestLoginHintCompletesAuthorize(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	params := validAuthorizeParams()
+	params.Set("login_hint", "acme-admin")
+	response, err := client.Get(authorizeURL(p.baseURL, params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound && response.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("login_hint status = %d: %s", response.StatusCode, body)
+	}
+	location := response.Header.Get("Location")
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("state") != "state-value-123" {
+		t.Fatalf("state = %q", u.Query().Get("state"))
+	}
+	code := u.Query().Get("code")
+	if code == "" {
+		t.Fatalf("code absent from %s", location)
+	}
+	result := exchange(t, p, client, code, verifier)
+	if result["_status"] != float64(http.StatusOK) && result["_status"] != http.StatusOK {
+		t.Fatalf("token exchange: %#v", result)
+	}
+	claims := jwtClaims(t, p, result["id_token"].(string))
+	if claims["sub"] != "oauthsonas|acme-admin" || claims["email"] != "admin@acme.dev.optimi.test" {
+		t.Fatalf("login_hint claims: %#v", claims)
+	}
+}
+
+func TestLoginHintUnknownRendersPicker(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	params := validAuthorizeParams()
+	params.Set("login_hint", "not-a-persona")
+	_ = begin(t, p, client, params)
+}
+
+func TestLoginHintRepeatedRejected(t *testing.T) {
+	p := newTestProvider(t, 5*time.Minute)
+	client := browserClient(t)
+	params := validAuthorizeParams()
+	params.Add("login_hint", "acme-admin")
+	params.Add("login_hint", "operator")
+	response, err := client.Get(authorizeURL(p.baseURL, params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusOK {
+		t.Fatal("repeated login_hint rendered chooser")
+	}
+	if response.StatusCode == http.StatusFound || response.StatusCode == http.StatusSeeOther {
+		u, err := url.Parse(response.Header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Query().Get("error") != "invalid_request" {
+			t.Fatalf("repeated login_hint error = %q", u.Query().Get("error"))
+		}
+		return
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("repeated login_hint status = %d", response.StatusCode)
+	}
+}
+
 func TestPersonaPickerDataAttributes(t *testing.T) {
 	p := newTestProvider(t, 5*time.Minute)
 	client := browserClient(t)
